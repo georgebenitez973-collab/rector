@@ -1,0 +1,1137 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pagos Pro | Gestión de Pagos Institucionales</title>
+    <!-- Carga de Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Carga de Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Carga de Chart.js para gráficos -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+    
+    <!-- Configuración de Tailwind -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#06b6d4', // Cyan 600 (Más bonito)
+                        secondary: '#3b82f6', // Blue 500
+                        accent: '#a855f7', // Violet 500 (Para acciones clave del Rector)
+                        danger: '#ef4444', // Red 500
+                        success: '#10b981', // Emerald 500
+                        warning: '#f59e0b', // Amber 500 para Deuda Vencida
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Estilos generales para un aspecto limpio y moderno */
+        body {
+            background-color: #f3f4f6;
+            font-family: 'Inter', sans-serif;
+        }
+        .card {
+            background-color: white;
+            border-radius: 0.75rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            padding: 1.5rem;
+        }
+        .status-badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-weight: 600;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+        }
+        /* Estilo para el modal de overlay */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 50;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Módulo de Firebase para persistencia de datos -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+        import { getFirestore, doc, collection, onSnapshot, query, addDoc, updateDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+        // --- Configuración y Constantes ---
+        const USERNAME = "gaby";
+        const PASSWORD = "1234";
+
+        // Inicialización de Variables Globales del Entorno Canvas
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let currentUserId = null;
+        let currentUserRole = null; // null hasta que el usuario inicie sesión y seleccione rol
+        let currentUsername = null; // NUEVO: Almacena el nombre de usuario de la aplicación (e.g., 'gaby')
+        let isAuthenticated = false;
+        let isAuthReady = false;
+        let currentTempPIN = null; // PIN temporal para seguridad del Rector
+        let expenseChart = null; // Variable para Chart.js
+
+        // Referencia a la colección pública
+        const getCollectionRef = () => {
+            if (!db || !currentUserId) return null;
+            return collection(db, `artifacts/${appId}/public/data/payment_requests`);
+        };
+
+        // Estados del flujo
+        const STATUS = {
+            PENDING_AREA: "Pendiente Área/Finanzas",
+            PENDING_RECTOR: "Pendiente Autorización Rector",
+            AUTHORIZED_BY_RECTOR: "Autorizado | Listo para Pago",
+            PAID: "Pagado y Ejecutado",
+            REJECTED: "Rechazado"
+        };
+        
+        window.onload = async () => {
+            try {
+                setLogLevel('debug');
+                
+                // 1. Inicializar Firebase
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // 2. Autenticación (Inicializa la sesión anónima o con token)
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // 3. Listener de Estado de Autenticación
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        currentUserId = user.uid;
+                        isAuthReady = true;
+                        
+                        // Si no hay un rol seleccionado, mostrar el login
+                        if (!currentUserRole) {
+                            document.getElementById('login-modal').classList.remove('hidden');
+                        } else {
+                            // Si ya hay rol, iniciar la escucha
+                            initListeners();
+                        }
+                    } else {
+                        currentUserId = crypto.randomUUID();
+                        isAuthReady = true;
+                        if (!auth.currentUser) signInAnonymously(auth);
+                        
+                        // Si no hay usuario de Firebase, mostrar el login
+                        document.getElementById('login-modal').classList.remove('hidden');
+                    }
+                });
+
+            } catch (error) {
+                console.error("Error al inicializar Firebase o autenticar:", error);
+                document.getElementById('main-content').innerHTML = `
+                    <div class="p-6 text-center text-danger font-semibold">
+                        Error al cargar la aplicación. Verifique la configuración de Firebase.
+                    </div>
+                `;
+            }
+        };
+
+        // --- Lógica de Autenticación y Roles ---
+
+        /**
+         * Simula el inicio de sesión con el usuario/contraseña.
+         */
+        window.handleLogin = () => {
+            const user = document.getElementById('login-username').value.trim();
+            const pass = document.getElementById('login-password').value.trim();
+            const role = document.getElementById('login-role').value;
+
+            if (user === USERNAME && pass === PASSWORD) {
+                isAuthenticated = true;
+                currentUserRole = role;
+                currentUsername = user; // Almacenar el nombre de usuario
+                
+                // 1. Ocultar el modal de login
+                document.getElementById('login-modal').classList.add('hidden');
+                
+                // 2. Configurar la UI
+                updateRoleUI(role);
+
+                window.showMessage(`Bienvenido(a), ${user}. Ha iniciado sesión como ${currentUserRole}.`, 'success');
+                initListeners(); // Iniciar la escucha de datos con el rol asignado
+            } else {
+                window.showMessage('Credenciales inválidas. Usuario: gaby, Contraseña: 1234.', 'danger');
+            }
+        };
+        
+        /**
+         * Actualiza el rol actual y recarga los listeners.
+         */
+        window.changeRole = (newRole) => {
+             currentUserRole = newRole;
+             document.getElementById('role-selection-modal').classList.add('hidden');
+             updateRoleUI(newRole);
+             window.showMessage(`Rol cambiado a: ${newRole}.`, 'primary');
+             initListeners();
+        }
+
+        /**
+         * Abre el modal para seleccionar un nuevo rol (sin pedir password de nuevo).
+         */
+        window.openRoleSelection = () => {
+            if (isAuthenticated) {
+                // Pre-seleccionar el rol actual si existe
+                const roleSelector = document.getElementById('change-role-selector');
+                if (currentUserRole) {
+                    roleSelector.value = currentUserRole;
+                }
+                document.getElementById('role-selection-modal').classList.remove('hidden');
+            } else {
+                window.showMessage('Por favor, inicie sesión primero.', 'danger');
+            }
+        }
+        
+        /**
+         * Función para actualizar la información de rol en el encabezado.
+         */
+        function updateRoleUI(role) {
+            // Mostrar el nombre de usuario de la aplicación
+            document.getElementById('user-id-display').textContent = `Usuario: ${currentUsername || 'N/A'}`;
+            document.getElementById('user-role-display').textContent = `Rol Actual: ${role}`;
+            document.getElementById('change-role-btn').classList.remove('hidden'); // Mostrar botón de cambio de rol
+        }
+
+        /**
+         * Inicializa los listeners de Firestore para mantener las vistas actualizadas.
+         */
+        function initListeners() {
+            if (!isAuthReady || !getCollectionRef()) return;
+
+            const q = query(getCollectionRef());
+
+            onSnapshot(q, (snapshot) => {
+                const requests = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                
+                // Renderizar las vistas según el rol actual
+                renderSolicitantRequests(requests);
+                renderRectorApprovals(requests);
+                renderTesoreriaExecution(requests);
+                
+                // Renderizar el reporte de tesorería SOLO para el Rector
+                renderTreasuryReport(requests);
+                
+                if (currentUserRole === 'Rector') {
+                    renderRectorDashboard(requests);
+                }
+            });
+        }
+
+        // --- Lógica del Flujo de Pagos ---
+
+        /**
+         * Maneja el envío de una nueva solicitud de pago.
+         */
+        window.handleSubmitRequest = async () => {
+            if (!isAuthReady || !currentUserId || currentUserRole !== 'Solicitante') { window.showMessage('Error: Debe ser Solicitante y estar logueado.', 'danger'); return; }
+            if (!currentUsername) { window.showMessage('Error de sesión: El nombre de usuario no está definido. Intente iniciar sesión de nuevo.', 'danger'); return; }
+
+            const type = document.getElementById('paymentType').value;
+            const expenseCategory = document.getElementById('expenseCategory').value; // Nuevo campo
+            const urgency = document.getElementById('urgency').value; // Nuevo campo
+            const dueDate = document.getElementById('dueDate').value; // Nuevo campo
+            
+            const netAmount = parseFloat(document.getElementById('netAmount').value) || 0;
+            const commissionAmount = parseFloat(document.getElementById('commissionAmount').value) || 0;
+            const justification = document.getElementById('justification').value.trim();
+            
+            // Nuevo manejo de adjunto de archivo (simulación)
+            const supportFile = document.getElementById('supportFile').files[0];
+            let supportFileName = '';
+            if (supportFile) {
+                supportFileName = supportFile.name;
+            }
+
+            if (netAmount <= 0 || justification === '' || supportFileName === '' || expenseCategory === '' || urgency === '' || dueDate === '') {
+                window.showMessage('Por favor, complete todos los campos obligatorios y adjunte el PDF de soporte.', 'danger');
+                return;
+            }
+            
+            const totalAmount = netAmount + commissionAmount;
+
+            const newRequest = {
+                requesterId: currentUserId,
+                requesterName: currentUsername, // GUARDAR EL NOMBRE DEL SOLICITANTE
+                requesterRole: currentUserRole,
+                type: type,
+                expenseCategory: expenseCategory, // Guardar Categoría
+                urgency: urgency, // Guardar Urgencia
+                dueDate: dueDate, // Guardar Vencimiento (Formato YYYY-MM-DD)
+                netAmount: netAmount,
+                commissionAmount: commissionAmount,
+                totalAmount: totalAmount,
+                justification: justification,
+                supportDocumentName: supportFileName, 
+                status: STATUS.PENDING_RECTOR,
+                // Trazabilidad inicial
+                accountingClassification: null, // Asignado después por Contabilidad/Rectoría
+                areaApprovalDate: new Date().toISOString(),
+                financeValidationDate: new Date().toISOString(),
+                rectorApprovalDate: null,
+                paymentExecutionDate: null,
+                paymentProofLink: null
+            };
+
+            try {
+                await addDoc(getCollectionRef(), newRequest);
+                window.showMessage('¡Solicitud de Pago enviada con éxito! Pendiente de Autorización del Rector.', 'success');
+                document.getElementById('paymentForm').reset();
+                window.toggleCommissionFields(); // Ocultar campos extra si estaban visibles
+            } catch (e) {
+                console.error("Error al añadir documento: ", e);
+                window.showMessage('Error al guardar la solicitud en la base de datos.', 'danger');
+            }
+        };
+        
+        /**
+         * Muestra/Oculta los campos de comisión según el tipo de pago.
+         */
+        window.toggleCommissionFields = () => {
+            const type = document.getElementById('paymentType').value;
+            const commissionDiv = document.getElementById('commissionFields');
+            const isCommission = type === 'Disposición Efectivo (Comisión)';
+            
+            commissionDiv.style.display = isCommission ? 'block' : 'none';
+            if (!isCommission) {
+                document.getElementById('commissionAmount').value = 0;
+            }
+        };
+
+        // --- Reemplazo de Prompt por Modal ---
+        let currentModalAction = null;
+        let currentModalId = null;
+        let currentModalAmount = null;
+
+        /**
+         * Muestra el modal de confirmación
+         */
+        window.showCustomModal = (action, id, amount) => { 
+            currentModalAction = action;
+            currentModalId = id;
+            currentModalAmount = amount;
+
+            const modalTitle = document.getElementById('custom-modal-title');
+            const modalBody = document.getElementById('custom-modal-body');
+            const confirmBtn = document.getElementById('custom-modal-confirm');
+            const inputGroup = document.getElementById('custom-modal-input-group');
+            
+            inputGroup.classList.add('hidden'); // Ocultar por defecto
+            document.getElementById('proof-group').classList.add('hidden');
+            document.getElementById('security-group').classList.add('hidden');
+            
+            // Limpiar inputs
+            document.getElementById('modal-security-pin-input').value = '';
+            document.getElementById('modal-proof-file-input').value = '';
+
+            if (action === 'rector_approve') {
+                // Generar PIN de seguridad (simulación de 2FA)
+                currentTempPIN = Math.floor(1000 + Math.random() * 9000); 
+                
+                modalTitle.textContent = 'AUTORIZACIÓN SEGURA DE PAGO';
+                modalBody.innerHTML = `<p class="text-lg">Monto a autorizar: **$${amount.toFixed(2)}**.</p>
+                                        <p class="text-sm text-gray-700 mt-2 p-2 bg-yellow-100 rounded-lg">
+                                            **SIMULACIÓN DE CÓDIGO:** Ingrese **${currentTempPIN}** para autorizar.
+                                        </p>
+                                        <p class="text-xs text-gray-500 mt-2">En un sistema real, este código se enviaría a su móvil o correo para validar su identidad.</p>`;
+                confirmBtn.textContent = 'Confirmar con Código de Verificación';
+                confirmBtn.className = 'bg-accent text-white font-bold py-2 px-4 rounded-lg hover:bg-accent/80 transition';
+                
+                // Mostrar input de PIN de seguridad
+                inputGroup.classList.remove('hidden');
+                document.getElementById('security-group').classList.remove('hidden');
+
+            } else if (action === 'tesoreria_execute') {
+                modalTitle.textContent = 'EJECUCIÓN Y REGISTRO DE COMPROBANTE';
+                modalBody.innerHTML = `<p class="text-lg">Confirme la transferencia de **$${amount.toFixed(2)}**.</p>`;
+                confirmBtn.textContent = 'Registrar Ejecución';
+                confirmBtn.className = 'bg-primary text-white font-bold py-2 px-4 rounded-lg hover:bg-primary/80 transition';
+                
+                // Mostrar input de Comprobante (Archivo)
+                inputGroup.classList.remove('hidden');
+                document.getElementById('proof-group').classList.remove('hidden');
+            }
+            document.getElementById('custom-modal').classList.remove('hidden');
+        };
+
+        /**
+         * Confirma la acción del modal y llama a la función de manejo.
+         */
+        window.confirmModalAction = async () => {
+            
+            if (currentModalAction === 'rector_approve') {
+                const enteredPin = document.getElementById('modal-security-pin-input').value.trim();
+                
+                if (parseInt(enteredPin, 10) !== currentTempPIN || !currentTempPIN) {
+                     window.showMessage('Código de verificación incorrecto o expirado.', 'danger');
+                     return;
+                }
+                
+                document.getElementById('custom-modal').classList.add('hidden');
+                await handleRectorApprove(currentModalId, currentModalAmount);
+                currentTempPIN = null; // Invalida el PIN
+
+            } else if (currentModalAction === 'tesoreria_execute') {
+                const proofFile = document.getElementById('modal-proof-file-input').files[0];
+                
+                if (!proofFile) {
+                    window.showMessage('Debe adjuntar el comprobante de pago ejecutado.', 'danger');
+                    return;
+                }
+                
+                document.getElementById('custom-modal').classList.add('hidden');
+                // Simulación de subida: usamos el nombre del archivo como referencia
+                await handleExecutePayment(currentModalId, currentModalAmount, proofFile.name);
+            }
+            
+            // Limpiar
+            document.getElementById('modal-security-pin-input').value = '';
+            document.getElementById('modal-proof-file-input').value = '';
+            currentModalAction = null;
+            currentModalId = null;
+            currentModalAmount = null;
+            currentTempPIN = null;
+        };
+        
+        window.cancelModal = () => {
+            document.getElementById('custom-modal').classList.add('hidden');
+            document.getElementById('modal-security-pin-input').value = '';
+            document.getElementById('modal-proof-file-input').value = '';
+            currentModalAction = null;
+            currentModalId = null;
+            currentModalAmount = null;
+            currentTempPIN = null;
+        };
+        
+        /**
+         * Rector: Autoriza el pago (el botón clave) con verificación de código.
+         */
+        async function handleRectorApprove(id, totalAmount) {
+            try {
+                const docRef = doc(db, getCollectionRef().path, id);
+                await updateDoc(docRef, {
+                    status: STATUS.AUTHORIZED_BY_RECTOR,
+                    rectorApprovalDate: new Date().toISOString(),
+                    // La clasificación contable puede ser añadida por otro rol (Contabilidad)
+                });
+                window.showMessage(`Pago # ${id.substring(0, 4)} AUTORIZADO de forma segura. Listo para ejecución.`, 'success');
+            } catch (e) {
+                console.error("Error al autorizar: ", e);
+                window.showMessage('Error al actualizar la solicitud.', 'danger');
+            }
+        }
+
+        /**
+         * Tesorería: Ejecuta y registra el pago (con nombre de archivo como comprobante).
+         */
+        async function handleExecutePayment(id, totalAmount, proofFileName) {
+            
+            try {
+                const docRef = doc(db, getCollectionRef().path, id);
+                await updateDoc(docRef, {
+                    status: STATUS.PAID,
+                    paymentExecutionDate: new Date().toISOString(),
+                    paymentProofLink: proofFileName // Registramos el nombre del archivo como comprobante
+                });
+                window.showMessage(`Pago # ${id.substring(0, 4)} EJECUTADO. Comprobante: ${proofFileName}.`, 'success');
+            } catch (e) {
+                console.error("Error al ejecutar pago: ", e);
+                window.showMessage('Error al actualizar la solicitud.', 'danger');
+            }
+        }
+
+
+        // --- Funciones de Renderizado (UI) ---
+
+        /**
+         * Muestra un mensaje temporal en la aplicación.
+         */
+        window.showMessage = (message, type = 'primary') => { 
+            const container = document.getElementById('message-container');
+            const bgColor = type === 'success' ? 'bg-success' : (type === 'danger' ? 'bg-danger' : 'bg-primary');
+            const element = document.createElement('div');
+            element.className = `p-4 mb-4 text-white font-semibold rounded-lg ${bgColor} transition transform`;
+            element.textContent = message;
+            container.appendChild(element);
+            setTimeout(() => {
+                element.remove();
+            }, 5000);
+        }
+
+        /**
+         * Genera el HTML para el badge de estatus.
+         */
+        function getStatusBadge(status) {
+            let colorClass = 'bg-gray-200 text-gray-800';
+            if (status === STATUS.PENDING_RECTOR) colorClass = 'bg-yellow-100 text-yellow-700';
+            if (status === STATUS.AUTHORIZED_BY_RECTOR) colorClass = 'bg-accent text-white'; // Usamos accent para autorizado
+            if (status === STATUS.PAID) colorClass = 'bg-success text-white';
+            if (status === STATUS.REJECTED) colorClass = 'bg-danger text-white';
+            
+            return `<span class="status-badge ${colorClass}">${status}</span>`;
+        }
+        
+        /**
+         * Genera el badge de urgencia.
+         */
+        function getUrgencyBadge(urgency) {
+            let colorClass = 'bg-gray-300 text-gray-800';
+            if (urgency === 'Urgente') colorClass = 'bg-yellow-500 text-white';
+            if (urgency === 'Crítica') colorClass = 'bg-danger text-white';
+            
+            return `<span class="px-2 py-0.5 rounded text-xs font-semibold ${colorClass}">${urgency}</span>`;
+        }
+        
+        /**
+         * Renderiza el Reporte de Tesorería (Visible SOLO para Rector).
+         */
+        function renderTreasuryReport(requests) {
+            const container = document.getElementById('treasury-report-kpis');
+            if (!container) return;
+
+            // Mostrar solo para Rector
+            const isVisible = currentUserRole === 'Rector';
+            container.classList.toggle('hidden', !isVisible);
+            if (!isVisible) return;
+            
+            const today = new Date();
+            today.setHours(0, 0, 0, 0); // Normalizar a medianoche para comparación de fechas
+
+            const unpaidRequests = requests.filter(r => r.status !== STATUS.PAID && r.status !== STATUS.REJECTED);
+
+            let totalPaid = 0;
+            let totalPastDue = 0;
+            let totalCurrentObligation = 0;
+            
+            // 1. Calcular Pagado
+            requests.filter(r => r.status === STATUS.PAID).forEach(r => {
+                totalPaid += r.totalAmount;
+            });
+
+            // 2. Calcular Deuda Vencida (Past Due) y Obligación Actual (Current Obligation)
+            unpaidRequests.forEach(r => {
+                const dueDate = new Date(r.dueDate);
+                dueDate.setHours(0, 0, 0, 0); // Normalizar
+
+                if (dueDate < today) {
+                    totalPastDue += r.totalAmount;
+                } else {
+                    totalCurrentObligation += r.totalAmount;
+                }
+            });
+
+            container.innerHTML = `
+                <h2 class="text-xl font-bold mb-4 text-gray-800 flex items-center">
+                    <i data-lucide="scan-line" class="w-5 h-5 mr-2 text-secondary"></i>
+                    Resumen de Obligaciones de Pago (Tesoreria)
+                </h2>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    <!-- Deuda Vencida (Rojo/Amarillo) -->
+                    <div class="card bg-warning/10 border-l-4 border-warning">
+                        <p class="text-sm font-medium text-gray-600">Total de Deuda Vencida (Adeudos Antiguos)</p>
+                        <p class="text-3xl font-bold text-warning mt-1">$${totalPastDue.toFixed(2)}</p>
+                        <p class="text-xs text-gray-500 mt-1">Pagos con vencimiento anterior y aún pendientes.</p>
+                    </div>
+                    <!-- Obligación Actual (Pendiente de Autorizar/Pagar) -->
+                    <div class="card bg-primary/10 border-l-4 border-primary">
+                        <p class="text-sm font-medium text-gray-600">Obligación Actual (Por Pagar)</p>
+                        <p class="text-3xl font-bold text-primary mt-1">$${totalCurrentObligation.toFixed(2)}</p>
+                        <p class="text-xs text-gray-500 mt-1">Pagos con vencimiento hoy o en el futuro.</p>
+                    </div>
+                    <!-- Total Pagado (Verde) -->
+                    <div class="card bg-success/10 border-l-4 border-success">
+                        <p class="text-sm font-medium text-gray-600">Total Pagado y Ejecutado</p>
+                        <p class="text-3xl font-bold text-success mt-1">$${totalPaid.toFixed(2)}</p>
+                        <p class="text-xs text-gray-500 mt-1">Dinero que ya salió de caja (ejecutado por Tesorería).</p>
+                    </div>
+                </div>
+            `;
+            lucide.createIcons();
+        }
+
+        /**
+         * Renderiza el Dashboard Ejecutivo del Rector.
+         */
+        function renderRectorDashboard(requests) {
+            const container = document.getElementById('rector-dashboard-analytics');
+            if (!container) return; // Asegurarse de que el contenedor existe
+            
+            const authorized = requests.filter(r => r.status === STATUS.AUTHORIZED_BY_RECTOR);
+            const pending = requests.filter(r => r.status === STATUS.PENDING_RECTOR);
+            const paid = requests.filter(r => r.status === STATUS.PAID);
+
+            const totalAuthorizedAmount = authorized.reduce((sum, r) => sum + r.totalAmount, 0);
+            const totalPendingCount = pending.length;
+            const totalCommissionPaid = paid.reduce((sum, r) => sum + r.commissionAmount, 0);
+            
+            // --- Análisis de Categorías para Gráfico ---
+            const categorySpending = paid.reduce((acc, r) => {
+                acc[r.expenseCategory] = (acc[r.expenseCategory] || 0) + r.totalAmount;
+                return acc;
+            }, {});
+
+            const chartLabels = Object.keys(categorySpending);
+            const chartData = Object.values(categorySpending);
+
+            container.innerHTML = `
+                <h2 class="text-3xl font-extrabold mb-6 text-gray-800 flex items-center">
+                    <i data-lucide="bar-chart-3" class="w-7 h-7 mr-3 text-primary"></i>
+                    Dashboard Ejecutivo y Análisis de Gasto
+                </h2>
+                
+                <!-- KPIs -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    <div class="card bg-primary/10 border-l-4 border-primary">
+                        <p class="text-sm font-medium text-gray-600">Total Autorizado Pendiente</p>
+                        <p class="text-3xl font-bold text-primary mt-1">$${totalAuthorizedAmount.toFixed(2)}</p>
+                    </div>
+                    <div class="card bg-yellow-100/50 border-l-4 border-yellow-500">
+                        <p class="text-sm font-medium text-gray-600">Total de Solicitudes Pendientes</p>
+                        <p class="text-3xl font-bold text-yellow-700 mt-1">${totalPendingCount}</p>
+                    </div>
+                    <div class="card bg-danger/10 border-l-4 border-danger">
+                        <p class="text-sm font-medium text-gray-600">Costo Acumulado de Comisiones</p>
+                        <p class="text-3xl font-bold text-danger mt-1">$${totalCommissionPaid.toFixed(2)}</p>
+                    </div>
+                </div>
+
+                <!-- Gráfica de Distribución de Gasto -->
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+                    <div class="card lg:col-span-1">
+                        <h3 class="text-lg font-semibold mb-4 text-gray-800">Distribución de Gasto por Categoría (Pagados)</h3>
+                        <div class="h-64 flex justify-center items-center">
+                            <canvas id="expenseChart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Tabla de Tendencias (Últimos Pagos) -->
+                    <div class="card lg:col-span-2 overflow-x-auto">
+                        <h3 class="text-lg font-semibold mb-4 text-gray-800">Tendencia: Urgencia y Vencimiento (Últimos 5 Pagados)</h3>
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead>
+                                <tr>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Monto</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Categoría</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Urgencia</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Vence</th>
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-gray-200">
+                                ${paid.sort((a, b) => new Date(b.paymentExecutionDate) - new Date(a.paymentExecutionDate)).slice(0, 5).map(r => `
+                                    <tr>
+                                        <td class="px-3 py-2 whitespace-nowrap text-sm font-medium text-gray-900">$${r.totalAmount.toFixed(2)}</td>
+                                        <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-600">${r.expenseCategory}</td>
+                                        <td class="px-3 py-2 whitespace-nowrap text-sm">${getUrgencyBadge(r.urgency)}</td>
+                                        <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-600">${r.dueDate}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                        ${paid.length === 0 ? '<p class="text-center text-gray-500 p-4">Aún no hay pagos ejecutados para analizar.</p>' : ''}
+                    </div>
+                </div>
+            `;
+            
+            // Renderizar la gráfica de pastel (Chart.js)
+            renderExpenseChart(chartLabels, chartData);
+            lucide.createIcons();
+        }
+        
+        /**
+         * Inicializa o actualiza la gráfica de pastel.
+         */
+        function renderExpenseChart(labels, data) {
+            const ctx = document.getElementById('expenseChart');
+            if (!ctx) return;
+
+            // Destruir la instancia anterior si existe
+            if (expenseChart) {
+                expenseChart.destroy();
+            }
+
+            // Colores bonitos para el gráfico
+            const chartColors = [
+                '#06b6d4', // primary (Cyan)
+                '#3b82f6', // secondary (Blue)
+                '#a855f7', // accent (Violet)
+                '#10b981', // success (Emerald)
+                '#f97316', // Orange
+                '#ef4444', // danger (Red)
+                '#6366f1', // Indigo
+                '#84cc16', // Lime
+            ];
+
+            expenseChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: data,
+                        backgroundColor: chartColors.slice(0, labels.length),
+                        hoverOffset: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                        },
+                        title: {
+                            display: false,
+                        }
+                    }
+                }
+            });
+        }
+
+
+        /**
+         * Renderiza la vista del Rector: Pagos pendientes de autorización final.
+         */
+        function renderRectorApprovals(requests) {
+            const approvalsContainer = document.getElementById('rector-approvals');
+            const dashboardContainer = document.getElementById('rector-dashboard-container'); // Contenedor para la lista de aprobaciones
+            const isRector = currentUserRole === 'Rector';
+            
+            approvalsContainer.classList.toggle('hidden', !isRector);
+            if (!isRector) return;
+
+            const pending = requests.filter(r => r.status === STATUS.PENDING_RECTOR);
+            
+            // Asegurarse de que el contenedor de aprobación existe dentro del contenedor principal
+            if (!dashboardContainer) {
+                 approvalsContainer.innerHTML = `<div id="rector-dashboard-analytics"></div><div id="rector-dashboard-container"></div>`;
+            }
+
+            const currentApprovalsContainer = document.getElementById('rector-dashboard-container');
+
+            currentApprovalsContainer.innerHTML = `
+                <h2 class="text-2xl font-bold mb-6 text-accent border-b pb-2 mt-8">
+                    <i data-lucide="file-key" class="inline-block w-6 h-6 mr-2"></i>
+                    Bandeja de Autorización Final (${pending.length} Solicitudes)
+                </h2>
+                ${pending.length === 0 
+                    ? '<p class="text-gray-500">No hay solicitudes pendientes de su autorización.</p>'
+                    : `<div class="space-y-4">
+                        ${pending.map(r => `
+                            <div class="card border-l-4 border-accent flex justify-between items-start transition duration-300 hover:shadow-lg">
+                                <div class="w-2/3 space-y-2">
+                                    <p class="text-sm font-semibold text-gray-700">Solicitado por: <span class="text-gray-900 font-bold">${r.requesterName || 'N/A'}</span></p>
+                                    <div class="flex items-center space-x-3">
+                                        <p class="text-sm font-semibold text-gray-500">Categoría: ${r.expenseCategory}</p>
+                                        ${getUrgencyBadge(r.urgency)}
+                                        <p class="text-sm text-gray-500">Vence: ${r.dueDate}</p>
+                                    </div>
+                                    <p class="text-3xl font-bold text-gray-800">$${r.totalAmount.toFixed(2)}</p>
+                                    ${r.commissionAmount > 0 ? `<p class="text-xs text-danger font-semibold">Incluye Comisión: $${r.commissionAmount.toFixed(2)}</p>` : ''}
+                                    <p class="text-base font-medium">Justificación: ${r.justification}</p>
+
+                                    <!-- VISTA MEJORADA DEL COMPROBANTE -->
+                                    <div class="pt-2">
+                                        <a href="#" onclick="window.showMessage('Simulando la apertura del documento: ${r.supportDocumentName}', 'primary'); return false;"
+                                           class="inline-flex items-center text-sm font-semibold text-primary hover:text-primary/80 transition bg-blue-50/50 rounded-lg p-2 border border-primary/20 shadow-sm">
+                                            <i data-lucide="file-text" class="w-4 h-4 mr-1"></i>
+                                            VER COMPROBANTE: ${r.supportDocumentName}
+                                        </a>
+                                    </div>
+                                </div>
+                                <div class="text-right w-1/3 flex flex-col justify-center h-full">
+                                    <button onclick="window.showCustomModal('rector_approve', '${r.id}', ${r.totalAmount})"
+                                            class="bg-accent text-white font-bold py-3 px-6 rounded-full shadow-lg hover:bg-accent/90 transition transform hover:scale-105 flex items-center justify-center">
+                                        <i data-lucide="lock" class="w-5 h-5 mr-2"></i>
+                                        AUTORIZAR CON CÓDIGO
+                                    </button>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>`
+                }
+            `;
+            lucide.createIcons();
+        }
+
+        /**
+         * Renderiza la vista de Tesorería: Pagos autorizados y listos para ejecutar.
+         */
+        function renderTesoreriaExecution(requests) {
+            const container = document.getElementById('tesoreria-execution');
+            const isTesoreria = currentUserRole === 'Tesorería';
+            container.classList.toggle('hidden', !isTesoreria);
+            if (!isTesoreria) return;
+
+            const readyToPay = requests.filter(r => r.status === STATUS.AUTHORIZED_BY_RECTOR);
+            
+            container.innerHTML = `
+                <h2 class="text-2xl font-bold mb-6 text-primary border-b pb-2">
+                    <i data-lucide="dollar-sign" class="inline-block w-6 h-6 mr-2"></i>
+                    Ejecución de Pagos (Tesorería)
+                </h2>
+                ${readyToPay.length === 0 
+                    ? '<p class="text-gray-500">No hay pagos AUTORIZADOS pendientes de ejecución. Excelente trabajo.</p>'
+                    : `<div class="space-y-4">
+                        ${readyToPay.map(r => `
+                            <div class="card border-l-4 border-primary flex justify-between items-center">
+                                <div>
+                                    <p class="text-xl font-bold text-gray-800">$${r.totalAmount.toFixed(2)}</p>
+                                    <p class="text-sm font-semibold text-gray-700">Solicitado por: <span class="text-gray-900">${r.requesterName || 'N/A'}</span></p>
+                                    <p class="text-sm text-gray-500 font-semibold">Categoría: ${r.expenseCategory}</p>
+                                    <p class="text-xs text-gray-400">Autorizado: ${new Date(r.rectorApprovalDate).toLocaleDateString()}</p>
+                                    
+                                    <!-- Visualización del Comprobante para Tesorería -->
+                                    <div class="mt-2">
+                                        <a href="#" onclick="window.showMessage('Simulando la apertura del documento: ${r.supportDocumentName}', 'primary'); return false;"
+                                           class="inline-flex items-center text-xs font-medium text-gray-600 hover:text-primary transition">
+                                            <i data-lucide="file-text" class="w-3 h-3 mr-1"></i>
+                                            Ver Soporte: ${r.supportDocumentName}
+                                        </a>
+                                    </div>
+                                </div>
+                                <div class="text-right">
+                                    <button onclick="window.showCustomModal('tesoreria_execute', '${r.id}', ${r.totalAmount})"
+                                            class="bg-primary text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-primary/90 transition duration-300">
+                                        <i data-lucide="banknote" class="w-4 h-4 mr-1 inline-block"></i>
+                                        Registrar Pago Ejecutado
+                                    </button>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>`
+                }
+            `;
+            lucide.createIcons();
+        }
+
+        /**
+         * Renderiza la vista del Solicitante: Formulario y Historial.
+         */
+        function renderSolicitantRequests(requests) {
+            const containerDashboard = document.getElementById('solicitant-dashboard');
+            const containerForm = document.getElementById('payment-request-module');
+            const isSolicitant = currentUserRole === 'Solicitante';
+            
+            containerForm.classList.toggle('hidden', !isSolicitant);
+            containerDashboard.classList.toggle('hidden', !isSolicitant);
+            
+            if (!isSolicitant) return;
+
+            const myRequests = requests.filter(r => r.requesterId === currentUserId);
+            
+            containerDashboard.innerHTML = `
+                <h2 class="text-2xl font-bold mb-6 text-primary border-b pb-2 mt-8">
+                    <i data-lucide="list-checks" class="inline-block w-6 h-6 mr-2"></i>
+                    Historial de Mis Solicitudes (${myRequests.length})
+                </h2>
+                ${myRequests.length === 0 
+                    ? '<p class="text-gray-500">Aún no has enviado ninguna solicitud de pago.</p>'
+                    : `<div class="space-y-4">
+                        ${myRequests.map(r => `
+                            <div class="card flex justify-between items-center">
+                                <div>
+                                    <p class="text-xl font-bold text-gray-800">$${r.totalAmount.toFixed(2)}</p>
+                                    <p class="text-sm text-gray-500">Tipo: ${r.type} | Cat: ${r.expenseCategory} | Vence: ${r.dueDate}</p>
+                                    ${r.commissionAmount > 0 ? `<p class="text-xs text-danger font-semibold">Comisión: $${r.commissionAmount.toFixed(2)}</p>` : ''}
+                                </div>
+                                <div class="text-right">
+                                    ${getStatusBadge(r.status)}
+                                    ${r.status === STATUS.PAID ? `<p class="text-xs text-success mt-1">Comprobante: ${r.paymentProofLink}</p>` : ''}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>`
+                }
+            `;
+            lucide.createIcons();
+        }
+
+    </script>
+    
+    <!-- MODAL DE INICIO DE SESIÓN (Pide credenciales Y selecciona rol inicial) -->
+    <div id="login-modal" class="modal-overlay hidden">
+        <div class="card w-full max-w-sm p-8 text-center">
+            <h2 class="text-3xl font-bold text-primary mb-6">
+                Acceso Pagos Pro
+            </h2>
+            <form onsubmit="event.preventDefault(); window.handleLogin();" class="space-y-4">
+                <div>
+                    <input type="text" id="login-username" required placeholder="Usuario (gaby)" value="gaby"
+                           class="w-full p-3 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary">
+                </div>
+                <div>
+                    <input type="password" id="login-password" required placeholder="Contraseña (1234)" value="1234"
+                           class="w-full p-3 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary">
+                </div>
+                <div>
+                    <label for="login-role" class="block text-sm font-medium text-gray-700 mb-1">Seleccionar Rol Inicial</label>
+                    <select id="login-role" required
+                            class="w-full p-3 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary bg-gray-50">
+                        <option value="Solicitante">Solicitante (Enviar Pagos)</option>
+                        <option value="Rector">Rector (Autorizar y Analizar)</option>
+                        <option value="Tesorería">Tesorería (Ejecutar Pago)</option>
+                    </select>
+                </div>
+                <button type="submit"
+                        class="w-full bg-primary text-white font-bold py-3 rounded-lg shadow-md hover:bg-primary/90 transition transform hover:scale-105">
+                    <i data-lucide="log-in" class="w-5 h-5 mr-2 inline-block"></i>
+                    Entrar al Sistema
+                </button>
+            </form>
+        </div>
+    </div>
+    
+    <!-- MODAL DE SELECCIÓN DE ROL (Para cambiar de vista después de loguearse) -->
+    <div id="role-selection-modal" class="modal-overlay hidden">
+        <div class="card w-full max-w-sm p-8 text-center">
+            <h2 class="text-3xl font-bold text-accent mb-6">
+                Cambiar Vista (Rol)
+            </h2>
+            <p class="text-gray-600 mb-4">Seleccione el rol que desea simular:</p>
+            <div>
+                <label for="change-role-selector" class="sr-only">Seleccionar Rol</label>
+                <select id="change-role-selector" required
+                        class="w-full p-3 border border-gray-300 rounded-lg focus:ring-accent focus:border-accent bg-gray-50 mb-6">
+                    <option value="Solicitante">Solicitante (Enviar Pagos)</option>
+                    <option value="Rector">Rector (Autorizar y Analizar)</option>
+                    <option value="Tesorería">Tesorería (Ejecutar Pago)</option>
+                </select>
+            </div>
+            <button onclick="window.changeRole(document.getElementById('change-role-selector').value)"
+                    class="w-full bg-accent text-white font-bold py-3 rounded-lg shadow-md hover:bg-accent/90 transition transform hover:scale-105">
+                <i data-lucide="switch-camera" class="w-5 h-5 mr-2 inline-block"></i>
+                Confirmar Cambio de Rol
+            </button>
+            <button onclick="window.cancelModal()"
+                    class="mt-3 w-full text-gray-600 font-bold py-2 rounded-lg hover:bg-gray-100 transition">
+                Cancelar
+            </button>
+        </div>
+    </div>
+    
+    <!-- MODAL DE CONFIRMACIÓN REUTILIZABLE (Reemplazo de prompt/alert) -->
+    <div id="custom-modal" class="modal-overlay hidden">
+        <div class="card w-full max-w-md p-6">
+            <h3 id="custom-modal-title" class="text-xl font-bold mb-4 text-center text-gray-800"></h3>
+            <div id="custom-modal-body" class="mb-6 text-center text-gray-700"></div>
+            
+            <div id="custom-modal-input-group" class="mb-4 hidden space-y-3">
+                
+                <!-- PIN de Seguridad (Solo Rector) -->
+                <div id="security-group" class="hidden">
+                    <label for="modal-security-pin-input" class="block text-sm font-medium text-gray-700 mb-1">Código de Verificación Único (4 Dígitos)</label>
+                    <input type="number" id="modal-security-pin-input" placeholder="XXXX" maxlength="4"
+                           class="w-full p-3 border border-gray-300 rounded-lg focus:ring-accent focus:border-accent text-center text-xl tracking-widest">
+                </div>
+                
+                <!-- Comprobante de Ejecución (Solo Tesorería - ARCHIVO) -->
+                <div id="proof-group" class="hidden">
+                    <label for="modal-proof-file-input" class="block text-sm font-medium text-gray-700 mb-1">Adjuntar Comprobante de Pago (PDF, Foto, etc.)</label>
+                    <input type="file" id="modal-proof-file-input" accept="application/pdf,image/*" required
+                           class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary focus:ring-primary p-3 border bg-white">
+                    <p class="text-xs text-gray-500 mt-1">Se acepta PDF, JPG, PNG. El nombre del archivo será registrado.</p>
+                </div>
+            </div>
+
+            <div class="flex justify-end space-x-3">
+                <button onclick="window.cancelModal()"
+                        class="bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg hover:bg-gray-400 transition">
+                    Cancelar
+                </button>
+                <button id="custom-modal-confirm" onclick="window.confirmModalAction()">
+                    <!-- Contenido cargado por JS -->
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Barra de Navegación/Encabezado -->
+    <header class="bg-primary text-white shadow-xl sticky top-0 z-10">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
+            <h1 class="text-3xl font-extrabold flex items-center">
+                <i data-lucide="receipt-text" class="w-7 h-7 mr-3"></i>
+                Pagos Pro
+            </h1>
+            <div class="text-right text-sm flex items-center space-x-4">
+                 <button id="change-role-btn" onclick="window.openRoleSelection()" class="hidden bg-white text-primary px-3 py-1 rounded-full font-bold text-xs hover:bg-gray-100 transition shadow-md flex items-center">
+                    <i data-lucide="users" class="w-4 h-4 mr-1"></i>
+                    Cambiar Rol
+                 </button>
+                <div>
+                    <p id="user-role-display" class="font-bold text-lg"></p>
+                    <p id="user-id-display" class="text-xs opacity-75"></p>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Contenedor Principal -->
+    <main id="main-content" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
+        
+        <!-- Contenedor de Mensajes (Alertas) -->
+        <div id="message-container"></div>
+        
+        <!-- Módulo de Reporte de Tesorería (Visible SOLO para Rector) -->
+        <div id="treasury-report-kpis" class="hidden">
+             <!-- Contenido cargado por JS -->
+        </div>
+
+        <!-- Módulo de Autorización del Rector (Visible solo para Rector) -->
+        <div id="rector-approvals" class="mb-10 hidden">
+            <!-- Contenedor del Dashboard y Analíticas -->
+            <div id="rector-dashboard-analytics"></div>
+            <!-- Contenedor de la Bandeja de Aprobación -->
+            <div id="rector-dashboard-container"></div>
+        </div>
+
+        <!-- Módulo de Ejecución de Tesorería (Visible solo para Tesorería) -->
+        <div id="tesoreria-execution" class="mb-10 hidden">
+            <!-- Contenido cargado por JS -->
+        </div>
+
+        <!-- Módulo de Solicitud de Pago (Formulario, Visible solo para Solicitante) -->
+        <div id="payment-request-module" class="card mb-10 hidden">
+            <h2 class="text-2xl font-bold mb-6 text-primary border-b pb-2">
+                <i data-lucide="file-plus" class="inline-block w-6 h-6 mr-2"></i>
+                Solicitud de Pago
+            </h2>
+            <form id="paymentForm" onsubmit="event.preventDefault(); window.handleSubmitRequest();" class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                
+                <!-- Tipo de Gasto -->
+                <div>
+                    <label for="paymentType" class="block text-sm font-medium text-gray-700 mb-1">Tipo de Pago</label>
+                    <select id="paymentType" onchange="window.toggleCommissionFields()" required
+                            class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary focus:ring-primary p-3 bg-gray-50 border">
+                        <option value="">Seleccione tipo...</option>
+                        <option value="Proveedor Normal">Proveedor Normal (Transferencia)</option>
+                        <option value="Servicios Fijos">Servicios Fijos (Agua/Luz)</option>
+                        <option value="Reembolso Empleado">Reembolso a Empleado</option>
+                        <option value="Disposición Efectivo (Comisión)">Disposición Efectivo (Vía Tercero / Comisión)</option>
+                    </select>
+                </div>
+
+                <!-- Categoría del Gasto (NUEVO) -->
+                <div>
+                    <label for="expenseCategory" class="block text-sm font-medium text-gray-700 mb-1">Categoría del Gasto</label>
+                    <select id="expenseCategory" required
+                            class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary focus:ring-primary p-3 bg-gray-50 border">
+                        <option value="">Seleccione categoría...</option>
+                        <option value="Gastos de Rectoría">Gastos de Rectoría</option>
+                        <option value="Gastos Operativos">Gastos Operativos (Generales)</option>
+                        <option value="Mantenimiento/Infraestructura">Mantenimiento/Infraestructura</option>
+                        <option value="Marketing/Ventas">Marketing/Ventas</option>
+                    </select>
+                </div>
+
+                <!-- Urgencia (NUEVO) -->
+                <div>
+                    <label for="urgency" class="block text-sm font-medium text-gray-700 mb-1">Nivel de Urgencia</label>
+                    <select id="urgency" required
+                            class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary focus:ring-primary p-3 bg-gray-50 border">
+                        <option value="Normal">Normal</option>
+                        <option value="Urgente">Urgente (Requiere atención en 24h)</option>
+                        <option value="Crítica">Crítica (Fallo Operativo)</option>
+                    </select>
+                </div>
+                
+                <!-- Monto Neto Requerido -->
+                <div>
+                    <label for="netAmount" class="block text-sm font-medium text-gray-700 mb-1">Monto Neto Requerido ($)</label>
+                    <input type="number" step="0.01" id="netAmount" required placeholder="Ej: 1500.00"
+                           class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary focus:ring-primary p-3 border">
+                </div>
+
+                <!-- Fecha de Vencimiento (NUEVO) -->
+                <div>
+                    <label for="dueDate" class="block text-sm font-medium text-gray-700 mb-1">Fecha de Vencimiento (Límite)</label>
+                    <input type="date" id="dueDate" required
+                           class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary focus:ring-primary p-3 border">
+                </div>
+
+                <!-- Campo de Beneficiario Final -->
+                <div>
+                    <label for="finalBeneficiary" class="block text-sm font-medium text-gray-700 mb-1">Beneficiario / Concepto Principal</label>
+                    <input type="text" id="finalBeneficiary" placeholder="Ej: Pago de Luz CFE / Juan Pérez"
+                        class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary focus:ring-primary p-3 border">
+                </div>
+
+
+                <!-- Campos de Comisión (Se muestran solo para "Disposición Efectivo") -->
+                <div id="commissionFields" class="md:col-span-3 space-y-4 hidden card bg-red-50 border-danger border-2 p-4">
+                    <h3 class="text-lg font-semibold text-danger">Detalles de Comisión (Disposición Efectivo)</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label for="commissionAmount" class="block text-sm font-medium text-gray-700 mb-1">Monto de la Comisión ($) *</label>
+                            <input type="number" step="0.01" id="commissionAmount" value="0"
+                                class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-danger focus:ring-danger p-3 border">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Justificación del Gasto -->
+                <div class="md:col-span-3">
+                    <label for="justification" class="block text-sm font-medium text-gray-700 mb-1">Justificación Detallada (Obligatorio)</label>
+                    <textarea id="justification" rows="3" required placeholder="Detalle el motivo, el centro de costo y la urgencia del pago..."
+                              class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary focus:ring-primary p-3 border"></textarea>
+                </div>
+                
+                <!-- Adjunto de Soporte (PDF/IMAGEN) -->
+                <div class="md:col-span-3">
+                    <label for="supportFile" class="block text-sm font-medium text-gray-700 mb-1">Adjuntar Comprobante (Factura/Ticket - PDF, JPG, PNG Obligatorio)</label>
+                    <input type="file" id="supportFile" accept="application/pdf,image/*" required
+                           class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary focus:ring-primary p-3 border bg-white">
+                    <p class="text-xs text-gray-500 mt-1">Se acepta PDF, JPG, PNG. El nombre del archivo será registrado.</p>
+                </div>
+
+                <!-- Botón de Envío -->
+                <div class="md:col-span-3 pt-4">
+                    <button type="submit"
+                            class="w-full bg-primary text-white font-bold py-3 px-4 rounded-lg shadow-lg hover:bg-primary/90 transition transform hover:scale-105 flex items-center justify-center">
+                        <i data-lucide="send-check" class="w-5 h-5 mr-2"></i>
+                        Enviar para Autorización del Rector
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Módulo de Dashboard del Solicitante (Visible solo para Solicitante) -->
+        <div id="solicitant-dashboard" class="hidden">
+            <!-- Contenido cargado por JS -->
+        </div>
+
+    </main>
+
+    <!-- Inicializar iconos de Lucide -->
+    <script>
+        lucide.createIcons();
+    </script>
+</body>
+</html>
