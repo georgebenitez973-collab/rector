@@ -67,94 +67,56 @@
 </head>
 <body>
 
-    <!-- Módulo de Firebase para persistencia de datos -->
     <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-        import { getFirestore, doc, collection, onSnapshot, query, addDoc, updateDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-
         // --- Configuración y Constantes ---
         const USERNAME = "gaby";
         const PASSWORD = "1234";
 
-        // Inicialización de Variables Globales del Entorno Canvas
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-        let app;
-        let db;
-        let auth;
-        let currentUserId = null;
-        let currentUserRole = null; // null hasta que el usuario inicie sesión y seleccione rol
-        let currentUsername = null; // NUEVO: Almacena el nombre de usuario de la aplicación (e.g., 'gaby')
+        let currentUserId = null; 
+        let currentUserRole = null; 
+        let currentUsername = null; 
         let isAuthenticated = false;
-        let isAuthReady = false;
-        let currentTempPIN = null; // PIN temporal para seguridad del Rector
-        let expenseChart = null; // Variable para Chart.js
-
-        // Referencia a la colección pública
-        const getCollectionRef = () => {
-            if (!db || !currentUserId) return null;
-            return collection(db, `artifacts/${appId}/public/data/payment_requests`);
-        };
+        let currentTempPIN = null; 
+        let expenseChart = null; 
+        
+        // Almacenamiento local de solicitudes
+        let requests = []; 
 
         // Estados del flujo
         const STATUS = {
-            PENDING_AREA: "Pendiente Área/Finanzas",
             PENDING_RECTOR: "Pendiente Autorización Rector",
             AUTHORIZED_BY_RECTOR: "Autorizado | Listo para Pago",
             PAID: "Pagado y Ejecutado",
             REJECTED: "Rechazado"
         };
         
-        window.onload = async () => {
-            try {
-                setLogLevel('debug');
-                
-                // 1. Inicializar Firebase
-                app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-
-                // 2. Autenticación (Inicializa la sesión anónima o con token)
-                if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(auth);
-                }
-
-                // 3. Listener de Estado de Autenticación
-                onAuthStateChanged(auth, (user) => {
-                    if (user) {
-                        currentUserId = user.uid;
-                        isAuthReady = true;
-                        
-                        // Si no hay un rol seleccionado, mostrar el login
-                        if (!currentUserRole) {
-                            document.getElementById('login-modal').classList.remove('hidden');
-                        } else {
-                            // Si ya hay rol, iniciar la escucha
-                            initListeners();
-                        }
-                    } else {
-                        currentUserId = crypto.randomUUID();
-                        isAuthReady = true;
-                        if (!auth.currentUser) signInAnonymously(auth);
-                        
-                        // Si no hay usuario de Firebase, mostrar el login
-                        document.getElementById('login-modal').classList.remove('hidden');
-                    }
-                });
-
-            } catch (error) {
-                console.error("Error al inicializar Firebase o autenticar:", error);
-                document.getElementById('main-content').innerHTML = `
-                    <div class="p-6 text-center text-danger font-semibold">
-                        Error al cargar la aplicación. Verifique la configuración de Firebase.
-                    </div>
-                `;
+        /**
+         * Carga las solicitudes desde localStorage.
+         */
+        function loadRequests() {
+            const storedRequests = localStorage.getItem('payment_requests');
+            if (storedRequests) {
+                requests = JSON.parse(storedRequests);
             }
+        }
+
+        /**
+         * Guarda las solicitudes en localStorage.
+         */
+        function saveRequests(data) {
+            requests = data;
+            localStorage.setItem('payment_requests', JSON.stringify(requests));
+        }
+
+        window.onload = async () => {
+            // 1. Carga inicial de datos desde localStorage
+            loadRequests(); 
+            
+            // 2. Simulación de ID de usuario y estado listo
+            currentUserId = crypto.randomUUID(); 
+
+            // 3. Mostrar modal de login/rol para comenzar
+            document.getElementById('login-modal').classList.remove('hidden');
         };
 
         // --- Lógica de Autenticación y Roles ---
@@ -170,7 +132,9 @@
             if (user === USERNAME && pass === PASSWORD) {
                 isAuthenticated = true;
                 currentUserRole = role;
-                currentUsername = user; // Almacenar el nombre de usuario
+                currentUsername = user; 
+                // Asignar un ID de usuario fijo para la simulación
+                currentUserId = 'user_' + user; 
                 
                 // 1. Ocultar el modal de login
                 document.getElementById('login-modal').classList.add('hidden');
@@ -179,21 +143,21 @@
                 updateRoleUI(role);
 
                 window.showMessage(`Bienvenido(a), ${user}. Ha iniciado sesión como ${currentUserRole}.`, 'success');
-                initListeners(); // Iniciar la escucha de datos con el rol asignado
+                window.refreshUI(); // Iniciar la carga de datos
             } else {
                 window.showMessage('Credenciales inválidas. Usuario: gaby, Contraseña: 1234.', 'danger');
             }
         };
         
         /**
-         * Actualiza el rol actual y recarga los listeners.
+         * Actualiza el rol actual y recarga los listeners (ahora solo refresca la UI).
          */
         window.changeRole = (newRole) => {
              currentUserRole = newRole;
              document.getElementById('role-selection-modal').classList.add('hidden');
              updateRoleUI(newRole);
              window.showMessage(`Rol cambiado a: ${newRole}.`, 'primary');
-             initListeners();
+             window.refreshUI();
         }
 
         /**
@@ -223,28 +187,25 @@
         }
 
         /**
-         * Inicializa los listeners de Firestore para mantener las vistas actualizadas.
+         * Refresca todas las vistas de la UI con los datos locales actuales.
          */
-        function initListeners() {
-            if (!isAuthReady || !getCollectionRef()) return;
+        window.refreshUI = () => {
+            if (!isAuthenticated || !currentUserRole) return;
+            
+            // Cargar datos (aunque ya están en global 'requests', aseguramos la última versión)
+            loadRequests(); 
 
-            const q = query(getCollectionRef());
-
-            onSnapshot(q, (snapshot) => {
-                const requests = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                
-                // Renderizar las vistas según el rol actual
-                renderSolicitantRequests(requests);
-                renderRectorApprovals(requests);
-                renderTesoreriaExecution(requests);
-                
-                // Renderizar el reporte de tesorería SOLO para el Rector
-                renderTreasuryReport(requests);
-                
-                if (currentUserRole === 'Rector') {
-                    renderRectorDashboard(requests);
-                }
-            });
+            // Renderizar las vistas según el rol actual
+            renderSolicitantRequests(requests);
+            renderRectorApprovals(requests);
+            renderTesoreriaExecution(requests);
+            
+            // Renderizar el reporte de tesorería SOLO para el Rector
+            renderTreasuryReport(requests);
+            
+            if (currentUserRole === 'Rector') {
+                renderRectorDashboard(requests);
+            }
         }
 
         // --- Lógica del Flujo de Pagos ---
@@ -253,19 +214,19 @@
          * Maneja el envío de una nueva solicitud de pago.
          */
         window.handleSubmitRequest = async () => {
-            if (!isAuthReady || !currentUserId || currentUserRole !== 'Solicitante') { window.showMessage('Error: Debe ser Solicitante y estar logueado.', 'danger'); return; }
+            if (!isAuthenticated || currentUserRole !== 'Solicitante') { window.showMessage('Error: Debe ser Solicitante y estar logueado.', 'danger'); return; }
             if (!currentUsername) { window.showMessage('Error de sesión: El nombre de usuario no está definido. Intente iniciar sesión de nuevo.', 'danger'); return; }
 
             const type = document.getElementById('paymentType').value;
-            const expenseCategory = document.getElementById('expenseCategory').value; // Nuevo campo
-            const urgency = document.getElementById('urgency').value; // Nuevo campo
-            const dueDate = document.getElementById('dueDate').value; // Nuevo campo
+            const expenseCategory = document.getElementById('expenseCategory').value;
+            const urgency = document.getElementById('urgency').value;
+            const dueDate = document.getElementById('dueDate').value;
             
             const netAmount = parseFloat(document.getElementById('netAmount').value) || 0;
             const commissionAmount = parseFloat(document.getElementById('commissionAmount').value) || 0;
             const justification = document.getElementById('justification').value.trim();
             
-            // Nuevo manejo de adjunto de archivo (simulación)
+            // Manejo de adjunto de archivo (simulación)
             const supportFile = document.getElementById('supportFile').files[0];
             let supportFileName = '';
             if (supportFile) {
@@ -280,21 +241,21 @@
             const totalAmount = netAmount + commissionAmount;
 
             const newRequest = {
+                id: crypto.randomUUID(), // Generar ID único
                 requesterId: currentUserId,
-                requesterName: currentUsername, // GUARDAR EL NOMBRE DEL SOLICITANTE
+                requesterName: currentUsername, // Guardar el nombre del solicitante
                 requesterRole: currentUserRole,
                 type: type,
-                expenseCategory: expenseCategory, // Guardar Categoría
-                urgency: urgency, // Guardar Urgencia
-                dueDate: dueDate, // Guardar Vencimiento (Formato YYYY-MM-DD)
+                expenseCategory: expenseCategory, 
+                urgency: urgency, 
+                dueDate: dueDate, 
                 netAmount: netAmount,
                 commissionAmount: commissionAmount,
                 totalAmount: totalAmount,
                 justification: justification,
                 supportDocumentName: supportFileName, 
                 status: STATUS.PENDING_RECTOR,
-                // Trazabilidad inicial
-                accountingClassification: null, // Asignado después por Contabilidad/Rectoría
+                // Trazabilidad
                 areaApprovalDate: new Date().toISOString(),
                 financeValidationDate: new Date().toISOString(),
                 rectorApprovalDate: null,
@@ -303,13 +264,17 @@
             };
 
             try {
-                await addDoc(getCollectionRef(), newRequest);
+                // Guardar localmente
+                requests.push(newRequest);
+                saveRequests(requests);
+                window.refreshUI();
+                
                 window.showMessage('¡Solicitud de Pago enviada con éxito! Pendiente de Autorización del Rector.', 'success');
                 document.getElementById('paymentForm').reset();
                 window.toggleCommissionFields(); // Ocultar campos extra si estaban visibles
             } catch (e) {
-                console.error("Error al añadir documento: ", e);
-                window.showMessage('Error al guardar la solicitud en la base de datos.', 'danger');
+                console.error("Error al añadir documento localmente: ", e);
+                window.showMessage('Error al guardar la solicitud.', 'danger');
             }
         };
         
@@ -327,7 +292,7 @@
             }
         };
 
-        // --- Reemplazo de Prompt por Modal ---
+        // --- Lógica de Modales y Seguridad ---
         let currentModalAction = null;
         let currentModalId = null;
         let currentModalAmount = null;
@@ -437,16 +402,20 @@
          */
         async function handleRectorApprove(id, totalAmount) {
             try {
-                const docRef = doc(db, getCollectionRef().path, id);
-                await updateDoc(docRef, {
-                    status: STATUS.AUTHORIZED_BY_RECTOR,
-                    rectorApprovalDate: new Date().toISOString(),
-                    // La clasificación contable puede ser añadida por otro rol (Contabilidad)
-                });
-                window.showMessage(`Pago # ${id.substring(0, 4)} AUTORIZADO de forma segura. Listo para ejecución.`, 'success');
+                // Actualizar localmente
+                const index = requests.findIndex(r => r.id === id);
+                if (index > -1) {
+                    requests[index].status = STATUS.AUTHORIZED_BY_RECTOR;
+                    requests[index].rectorApprovalDate = new Date().toISOString();
+                    
+                    saveRequests(requests);
+                    window.refreshUI();
+                    
+                    window.showMessage(`Pago # ${id.substring(0, 4)} AUTORIZADO de forma segura. Listo para ejecución.`, 'success');
+                }
             } catch (e) {
                 console.error("Error al autorizar: ", e);
-                window.showMessage('Error al actualizar la solicitud.', 'danger');
+                window.showMessage('Error al actualizar la solicitud localmente.', 'danger');
             }
         }
 
@@ -456,16 +425,21 @@
         async function handleExecutePayment(id, totalAmount, proofFileName) {
             
             try {
-                const docRef = doc(db, getCollectionRef().path, id);
-                await updateDoc(docRef, {
-                    status: STATUS.PAID,
-                    paymentExecutionDate: new Date().toISOString(),
-                    paymentProofLink: proofFileName // Registramos el nombre del archivo como comprobante
-                });
-                window.showMessage(`Pago # ${id.substring(0, 4)} EJECUTADO. Comprobante: ${proofFileName}.`, 'success');
+                // Actualizar localmente
+                const index = requests.findIndex(r => r.id === id);
+                if (index > -1) {
+                    requests[index].status = STATUS.PAID;
+                    requests[index].paymentExecutionDate = new Date().toISOString();
+                    requests[index].paymentProofLink = proofFileName; // Registramos el nombre del archivo como comprobante
+                    
+                    saveRequests(requests);
+                    window.refreshUI();
+                    
+                    window.showMessage(`Pago # ${id.substring(0, 4)} EJECUTADO. Comprobante: ${proofFileName}.`, 'success');
+                }
             } catch (e) {
                 console.error("Error al ejecutar pago: ", e);
-                window.showMessage('Error al actualizar la solicitud.', 'danger');
+                window.showMessage('Error al actualizar la solicitud localmente.', 'danger');
             }
         }
 
@@ -806,7 +780,7 @@
                                     <p class="text-xl font-bold text-gray-800">$${r.totalAmount.toFixed(2)}</p>
                                     <p class="text-sm font-semibold text-gray-700">Solicitado por: <span class="text-gray-900">${r.requesterName || 'N/A'}</span></p>
                                     <p class="text-sm text-gray-500 font-semibold">Categoría: ${r.expenseCategory}</p>
-                                    <p class="text-xs text-gray-400">Autorizado: ${new Date(r.rectorApprovalDate).toLocaleDateString()}</p>
+                                    <p class="text-xs text-gray-400">Autorizado: ${r.rectorApprovalDate ? new Date(r.rectorApprovalDate).toLocaleDateString() : 'N/A'}</p>
                                     
                                     <!-- Visualización del Comprobante para Tesorería -->
                                     <div class="mt-2">
@@ -845,7 +819,8 @@
             
             if (!isSolicitant) return;
 
-            const myRequests = requests.filter(r => r.requesterId === currentUserId);
+            // Filtrar solicitudes por el ID de usuario de la simulación
+            const myRequests = requests.filter(r => r.requesterName === currentUsername);
             
             containerDashboard.innerHTML = `
                 <h2 class="text-2xl font-bold mb-6 text-primary border-b pb-2 mt-8">
